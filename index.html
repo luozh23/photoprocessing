@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>照片裁剪与排版工具</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    h2 { margin-top: 40px; }
+    canvas { display: block; max-width: 100%; border: 1px solid #ccc; margin: 5px 0; }
+    #canvasWrapper, #layoutWrapper { position: relative; display: inline-block; }
+    #cropBox {
+      position: absolute;
+      border: 2px dashed red;
+      cursor: move;
+      box-sizing: border-box;
+      display: none;
+      will-change: top, left, width, height;
+    }
+    .resizer {
+      width: 10px; height: 10px; background: red; position: absolute;
+      will-change: top, left;
+    }
+    .top-left    { top: -5px; left: -5px;     cursor: nwse-resize; }
+    .top-right   { top: -5px; right: -5px;    cursor: nesw-resize; }
+    .bottom-left { bottom: -5px; left: -5px;  cursor: nesw-resize; }
+    .bottom-right{ bottom: -5px; right: -5px; cursor: nwse-resize; }
+    .controls input, .controls select, .controls button { margin-right: 8px; }
+  </style>
+</head>
+<body>
+
+  <h2>1. 照片裁剪</h2>
+  <div class="controls">
+    <input type="file" id="uploadCrop" accept="image/*" />
+    宽(mm): <input type="number" id="widthInput" style="width:60px;">
+    高(mm): <input type="number" id="heightInput" style="width:60px;">
+    DPI: <input type="number" id="dpi" value="300" style="width:60px;">
+    比例:
+    <select id="aspectRatio">
+      <option value="">自由</option>
+      <option value="1">1:1</option>
+      <option value="4/3">4:3</option>
+      <option value="3/4">3:4</option>
+      <option value="16/9">16:9</option>
+      <option value="9/16">9:16</option>
+      <option value="3/2">3:2</option>
+    </select>
+    <button id="setCrop">设置裁剪框</button>
+    <button id="centerH">水平居中</button>
+    <button id="centerV">垂直居中</button>
+    <button id="clearCrop">清空</button>
+    <br><br>
+    导出格式:
+    <select id="formatSelect">
+      <option value="png">PNG</option>
+      <option value="jpg">JPG</option>
+      <option value="jpeg">JPEG</option>
+    </select>
+    <button id="exportBtn">导出</button>
+    <a id="downloadLink" style="display:none;">下载</a>
+    <br><br>
+    <span id="sizeDisplay">宽: -- mm，高: -- mm</span>
+  </div>
+  <div id="canvasWrapper">
+    <canvas id="canvas"></canvas>
+    <div id="cropBox">
+      <div class="resizer top-left"></div>
+      <div class="resizer top-right"></div>
+      <div class="resizer bottom-left"></div>
+      <div class="resizer bottom-right"></div>
+    </div>
+  </div>
+
+
+  <h2>2. 照片排版</h2>
+  <div class="controls">
+    <input type="file" id="uploadLayout" accept="image/*" />
+    纸张:
+    <select id="paperSize">
+      <option value="a4">A4 (210×297mm)</option>
+      <option value="a6">A6 (105×148mm)</option>
+    </select>
+    方向:
+    <select id="orientation">
+      <option value="portrait">纵向</option>
+      <option value="landscape">横向</option>
+    </select>
+    DPI: <input type="number" id="layoutDpi" value="300" style="width:60px;">
+    <br><br>
+    水平间距(mm): <input type="number" id="spacingH" value="5" style="width:60px;">
+    垂直间距(mm): <input type="number" id="spacingV" value="5" style="width:60px;">
+    <br><br>
+    导出格式:
+    <select id="layoutFormat">
+      <option value="png">PNG</option>
+      <option value="jpg">JPG</option>
+      <option value="jpeg">JPEG</option>
+    </select>
+    <button id="layoutBtn">生成排版</button>
+    <button id="clearLayout">清空</button>
+    <a id="layoutDownload" style="display:none;">下载排版</a>
+  </div>
+  <div id="layoutWrapper">
+    <canvas id="layoutCanvas"></canvas>
+  </div>
+
+
+<script>
+  // 毫米转像素
+  function mmToPx(mm, dpi) { return mm * dpi / 25.4; }
+
+  // —— 裁剪部分 ——
+  const canvas = document.getElementById('canvas'),
+        ctx = canvas.getContext('2d'),
+        cropBox = document.getElementById('cropBox'),
+        resultCanvas = document.createElement('canvas'),
+        resultCtx = resultCanvas.getContext('2d'),
+        downloadLink = document.getElementById('downloadLink'),
+        sizeDisplay = document.getElementById('sizeDisplay');
+
+  let imgCrop = new Image(),
+      isDragging = false,
+      isResizing = false,
+      currentResizer = null,
+      dragTarget = { x: 0, y: 0, width: 0, height: 0 },
+      needsUpdate = false;
+
+  document.getElementById('uploadCrop').addEventListener('change', e => {
+    const f = e.target.files[0]; if(!f) return;
+    const r = new FileReader();
+    r.onload = ev => {
+      imgCrop.onload = () => {
+        canvas.width = imgCrop.width;
+        canvas.height = imgCrop.height;
+        ctx.drawImage(imgCrop, 0, 0);
+        cropBox.style.display = 'none';
+        downloadLink.style.display = 'none';
+        sizeDisplay.innerText = '宽: -- mm，高: -- mm';
+      };
+      imgCrop.src = ev.target.result;
+    };
+    r.readAsDataURL(f);
+  });
+
+  function getAspect() {
+    const v = document.getElementById('aspectRatio').value;
+    return v ? eval(v) : null;
+  }
+
+  function updateSizeDisplay() {
+    const dpi = parseFloat(document.getElementById('dpi').value),
+          scale = 25.4 / dpi,
+          w = dragTarget.width,
+          h = dragTarget.height;
+    sizeDisplay.innerText = `宽: ${(w * scale).toFixed(1)} mm，高: ${(h * scale).toFixed(1)} mm`;
+  }
+
+  function applyDragOrResize() {
+    cropBox.style.left   = dragTarget.x + 'px';
+    cropBox.style.top    = dragTarget.y + 'px';
+    cropBox.style.width  = dragTarget.width + 'px';
+    cropBox.style.height = dragTarget.height + 'px';
+    updateSizeDisplay();
+    needsUpdate = false;
+  }
+
+  function scheduleUpdate() {
+    if (!needsUpdate) {
+      needsUpdate = true;
+      requestAnimationFrame(applyDragOrResize);
+    }
+  }
+
+  document.getElementById('setCrop').onclick = () => {
+    if (!imgCrop.src) return alert('请先上传图片');
+    const dpi = parseFloat(document.getElementById('dpi').value),
+          w_mm = parseFloat(document.getElementById('widthInput').value),
+          h_mm = parseFloat(document.getElementById('heightInput').value),
+          w_px = mmToPx(w_mm, dpi),
+          h_px = mmToPx(h_mm, dpi);
+    dragTarget = { x: 0, y: 0, width: w_px, height: h_px };
+    cropBox.style.display = 'block';
+    scheduleUpdate();
+  };
+
+  cropBox.addEventListener('mousedown', e => {
+    const rect = cropBox.getBoundingClientRect(),
+          parentRect = canvas.getBoundingClientRect();
+    if (e.target.classList.contains('resizer')) {
+      isResizing = true;
+      currentResizer = e.target;
+    } else {
+      isDragging = true;
+      dragTarget.x = rect.left - parentRect.left;
+      dragTarget.y = rect.top - parentRect.top;
+      dragTarget.width  = rect.width;
+      dragTarget.height = rect.height;
+      dragOffset = { x: e.clientX, y: e.clientY };
+    }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+
+  function onMouseMove(e) {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const aspect = getAspect();
+
+    if (isDragging) {
+      const dx = e.clientX - dragOffset.x;
+      const dy = e.clientY - dragOffset.y;
+      dragTarget.x += dx;
+      dragTarget.y += dy;
+      dragOffset = { x: e.clientX, y: e.clientY };
+    } else if (isResizing) {
+      let { x, y, width: w, height: h } = dragTarget;
+      if (currentResizer.classList.contains('bottom-right')) {
+        w = mx - x;
+        h = aspect ? w / aspect : my - y;
+      } else if (currentResizer.classList.contains('top-left')) {
+        w = w + (x - mx);
+        h = aspect ? w / aspect : h + (y - my);
+        x = mx; y = my;
+      } else if (currentResizer.classList.contains('top-right')) {
+        w = mx - x;
+        h = aspect ? w / aspect : h + (y - my);
+        y = my;
+      } else if (currentResizer.classList.contains('bottom-left')) {
+        w = w + (x - mx);
+        h = aspect ? w / aspect : my - y;
+        x = mx;
+      }
+      if (w > 20 && h > 20) {
+        dragTarget = { x, y, width: w, height: h };
+      }
+    }
+    scheduleUpdate();
+  }
+
+  function onMouseUp() {
+    isDragging = isResizing = false;
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
+  }
+
+  document.getElementById('centerH').onclick = () => {
+    dragTarget.x = (canvas.width - dragTarget.width) / 2;
+    scheduleUpdate();
+  };
+  document.getElementById('centerV').onclick = () => {
+    dragTarget.y = (canvas.height - dragTarget.height) / 2;
+    scheduleUpdate();
+  };
+  document.getElementById('clearCrop').onclick = () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    canvas.width = canvas.height = 0;
+    cropBox.style.display = 'none';
+    downloadLink.style.display = 'none';
+    document.getElementById('uploadCrop').value = '';
+    sizeDisplay.innerText = '宽: -- mm，高: -- mm';
+  };
+  document.getElementById('exportBtn').onclick = () => {
+    if (cropBox.style.display === 'none') return;
+    const cropR = cropBox.getBoundingClientRect(),
+          canR  = canvas.getBoundingClientRect(),
+          sx = (cropR.left - canR.left) * canvas.width  / canR.width,
+          sy = (cropR.top  - canR.top ) * canvas.height / canR.height,
+          sw = cropR.width  * canvas.width  / canR.width,
+          sh = cropR.height * canvas.height / canR.height;
+    resultCanvas.width  = sw;
+    resultCanvas.height = sh;
+    resultCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+    const fmt = document.getElementById('formatSelect').value,
+          data = resultCanvas.toDataURL(`image/${fmt}`),
+          link = downloadLink;
+    link.href = data;
+    link.download = `cropped.${fmt}`;
+    link.style.display = 'inline';
+  };
+
+
+  // —— 排版部分 ——
+  const layoutCanvas = document.getElementById('layoutCanvas'),
+        layoutCtx = layoutCanvas.getContext('2d'),
+        layoutDownload = document.getElementById('layoutDownload');
+  let imgLayout = null,
+      layoutParams = {},
+      layoutScheduled = false;
+
+  document.getElementById('uploadLayout').addEventListener('change', e => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = ev => {
+      imgLayout = new Image();
+      imgLayout.onload = () => { scheduleLayout(); };
+      imgLayout.src = ev.target.result;
+    };
+    r.readAsDataURL(f);
+  });
+
+  function gatherLayoutParams() {
+    const dpi   = parseFloat(document.getElementById('layoutDpi').value),
+          paper = document.getElementById('paperSize').value,
+          orient= document.getElementById('orientation').value,
+          fmt   = document.getElementById('layoutFormat').value,
+          hSp_mm= parseFloat(document.getElementById('spacingH').value),
+          vSp_mm= parseFloat(document.getElementById('spacingV').value),
+          sizes = { a4: [210,297], a6: [105,148] };
+    let [w_mm,h_mm] = sizes[paper];
+    if (orient === 'landscape') [w_mm,h_mm] = [h_mm,w_mm];
+    const margin_mm = 3.5;
+    return { dpi, w_mm, h_mm, fmt, hSp_mm, vSp_mm, margin_mm };
+  }
+
+  function generateLayout() {
+    if (!imgLayout) return;
+    layoutParams = gatherLayoutParams();
+    const { dpi, w_mm, h_mm, fmt, hSp_mm, vSp_mm, margin_mm } = layoutParams;
+    const margin_px = mmToPx(margin_mm, dpi),
+          pw  = mmToPx(w_mm, dpi),
+          ph  = mmToPx(h_mm, dpi),
+          spX = mmToPx(hSp_mm, dpi),
+          spY = mmToPx(vSp_mm, dpi),
+          iw  = imgLayout.width,
+          ih  = imgLayout.height,
+          innerW = pw - 2 * margin_px,
+          innerH = ph - 2 * margin_px,
+          cols   = Math.floor((innerW + spX) / (iw + spX)),
+          rows   = Math.floor((innerH + spY) / (ih + spY));
+
+    layoutCanvas.width  = pw;
+    layoutCanvas.height = ph;
+    layoutCtx.fillStyle = "#fff";
+    layoutCtx.fillRect(0,0,pw,ph);
+    layoutCtx.strokeStyle = 'rgba(100,100,100,0.5)';
+    layoutCtx.lineWidth = 1;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x = margin_px + c * (iw + spX),
+              y = margin_px + r * (ih + spY);
+        layoutCtx.drawImage(imgLayout, x, y, iw, ih);
+        layoutCtx.strokeRect(x, y, iw, ih);
+      }
+    }
+
+    const data = layoutCanvas.toDataURL(`image/${fmt}`);
+    layoutDownload.href     = data;
+    layoutDownload.download = `layout.${fmt}`;
+    layoutDownload.style.display = 'inline';
+  }
+
+  function scheduleLayout() {
+    if (!layoutScheduled) {
+      layoutScheduled = true;
+      requestAnimationFrame(() => {
+        generateLayout();
+        layoutScheduled = false;
+      });
+    }
+  }
+
+  ['paperSize','orientation','layoutDpi','spacingH','spacingV','layoutFormat']
+    .forEach(id => {
+      document.getElementById(id).addEventListener('input', scheduleLayout);
+    });
+  document.getElementById('layoutBtn').onclick = scheduleLayout;
+  document.getElementById('clearLayout').onclick = () => {
+    layoutCtx.clearRect(0,0,layoutCanvas.width,layoutCanvas.height);
+    layoutCanvas.width = layoutCanvas.height = 0;
+    layoutDownload.style.display = 'none';
+    document.getElementById('uploadLayout').value = '';
+    imgLayout = null;
+  };
+</script>
+
+</body>
+</html>
